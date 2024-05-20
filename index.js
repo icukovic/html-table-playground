@@ -4,17 +4,46 @@ const TABLE_DATASET = {
 }
 
 // FUNCTIONS
-function throttle(fn) {
+/**
+ * @param {function(any): any} fn Any function that will be throttled
+ * @param {number} waitInMs Time in ms for which function will not be instantly .
+ * @return {function(any): any} Throttled function
+ */
+function throttle(fn, waitInMs) {
     let timeout;
     let end;
-    return (waitInMs, ...args) => {
+
+    return (...args) => {
         timeout = timeout && clearTimeout(timeout);
         if (end > Date.now()) {
             timeout = setTimeout(() => fn(...args), waitInMs);
             return;
         }
-        fn(...args);
+
+        const value = fn(...args);
         end = Date.now() + waitInMs;
+        return value
+    }
+}
+
+/**
+ * Returns number of table columns.
+ * @param tableElement
+ * @return {number}
+ */
+function noTableColumns(tableElement) {
+    return tableElement.rows.item(0).cells.length;
+}
+
+function* iterateCellsByColumn(tableElement, colIndex) {
+    for (const row of tableElement.rows) {
+        yield row.cells.item(colIndex);
+    }
+}
+
+function* iterateCellsByRow(tableElement, rowIndex) {
+    for (const cell of tableElement.rows.item(rowIndex).cells) {
+        yield cell;
     }
 }
 
@@ -26,7 +55,7 @@ function throttle(fn) {
 function resizeTableCell(tableCell, width, minWidth) {
     tableCell.style.width = width + "px";
 
-    if(minWidth !== undefined) {
+    if (minWidth !== undefined) {
         tableCell.style.minWidth = minWidth + "px";
     }
 }
@@ -46,37 +75,50 @@ function freezeTableCell(tableCell, offset, freeze) {
     }
 }
 
-function recalculateTable(table, resetTableColumns = false, thToToggleFreeze = null) {
+/**
+ * @typedef {object} TableRecalculateOptions
+ * @property {boolean?} resetColumnWidths If true resets all column width to same minimal value
+ * @property {number?} toggleColumnFreeze Freeze or unfreeze cells for given column index
+ */
+
+/**
+ * @typedef RecalculateTableFn
+ * @param {HTMLTableElement} table
+ * @param {TableRecalculateOptions?} options
+ */
+function recalculateTable(table, options) {
     console.time('recalculateTable');
     table.style.setProperty("--c-table-height", table.offsetHeight + "px");
 
-    if (resetTableColumns) {
+    if (options?.resetColumnWidths === true) {
+        const noColumns = noTableColumns(table.tHead);
         const minWidth = 48;
-        const width = Math.max((tableContainerWidth - 2) / ths.length, minWidth);
-        for (const th of ths) {
+        const width = Math.max(tableContainerWidth / noColumns, minWidth);
+        for (const th of iterateCellsByRow(table.tHead, 0)) {
             resizeTableCell(th, width, minWidth);
         }
     }
 
+    // Recalculates Frozen Column Offset
     let offset = 0;
-    for (const i in ths) {
-        const th = ths[i];
-        let isFrozen = th.hasAttribute(TABLE_DATASET.FROZEN)
+    for (const th of iterateCellsByRow(table.tHead, 0)) {
+        const column = th.cellIndex;
+        const toggleCell = column === options?.toggleColumnFreeze;
+        let isCellFrozen = th.hasAttribute(TABLE_DATASET.FROZEN);
 
-        if (th === thToToggleFreeze) {
-            isFrozen = !isFrozen;
-        } else if (!isFrozen) {
+        if (toggleCell) {
+            isCellFrozen = !isCellFrozen
+        } else if (!isCellFrozen) {
             continue;
         }
 
         const thWidth = th.offsetWidth;
-        const leftOffset = offset + "px";
-        freezeTableCell(th, leftOffset, isFrozen);
-        for (const td of tdsByColumnNo[i]) {
-            freezeTableCell(td, leftOffset, isFrozen);
+        for (const cell of iterateCellsByColumn(table, column)) {
+            freezeTableCell(cell, offset + "px", isCellFrozen);
         }
-        offset += isFrozen && thWidth || 0;
+        offset += thWidth;
     }
+
     console.timeEnd('recalculateTable');
 }
 
@@ -84,40 +126,41 @@ function recalculateTable(table, resetTableColumns = false, thToToggleFreeze = n
 console.time('setup');
 let tableContainerWidth = 0;
 const table = document.querySelector('table');
-/** @type {HTMLTableCellElement[]}*/
-const ths = Array.from(table.querySelectorAll('thead th'));
-/** @type {Object.<String, HTMLTableCellElement[]>} */
-const tdsByColumnNo = {};
-for (const i in ths) {
-    const nthChild = parseInt(i) + 1;
-    tdsByColumnNo[i] = Array.from(table.querySelectorAll("tbody tr td:nth-child(" + nthChild + ")"));
-}
+
 console.timeEnd('setup');
-console.log("No Columns: " + ths.length);
-console.log("No Rows: " + tdsByColumnNo[0].length);
-const noCells = (ths.length + ths.length * tdsByColumnNo[0].length);
+const ths = table.tHead.rows.item(0).cells
+const noColumns = ths.length;
+console.log("No Columns: " + noColumns)
+const noRows = table.rows.length;
+console.log("No Rows: " + noRows);
+const noCells = noRows * noColumns;
 console.log("No Cells: " + noCells);
 
 // TABLE EVENT
-const throttledRecalculateTable = throttle(recalculateTable);
+/** @type {RecalculateTableFn} */
+const throttledRecalculateTable = throttle(recalculateTable, 1000 / 30);
 
 const resizeObserver = new ResizeObserver((entries) => {
     for (const entry of entries) {
         switch (entry.target) {
             case table.parentElement:
                 tableContainerWidth = entry.contentRect.width;
-                throttledRecalculateTable(1000 / 30, table, true);
+                throttledRecalculateTable(table, {
+                    resetColumnWidths: true
+                });
                 break;
         }
     }
 });
 resizeObserver.observe(table.parentElement);
 
-ths.forEach((element) => {
-    element.addEventListener("dblclick", (event) => {
-        throttledRecalculateTable(1000 / 30, table, false, event.currentTarget);
+for (const th of ths) {
+    th.addEventListener("dblclick", (event) => {
+        throttledRecalculateTable(table, {
+            toggleColumnFreeze: event.currentTarget.cellIndex
+        });
     });
-});
+}
 
 let handle;
 let mouseTh;
@@ -143,7 +186,7 @@ table.addEventListener("mousemove", (event) => {
     const minWidth = parseFloat(getComputedStyle(mouseTh).getPropertyValue("min-width") || 0);
     const newThWidth = Math.max(mouseX - thX, minWidth);
 
-    if(newThWidth === thWidth) return;
+    if (newThWidth === thWidth) return;
 
     const tableWidth = table.offsetWidth;
     const tableContainerWidth = table.parentElement.clientWidth;
@@ -155,7 +198,7 @@ table.addEventListener("mousemove", (event) => {
     }
 
     resizeTableCell(mouseTh, newThWidth);
-    throttledRecalculateTable(1000 / 30, table);
+    throttledRecalculateTable(table);
 });
 
 document.querySelectorAll(".resizable_handle")
@@ -170,37 +213,22 @@ document.querySelectorAll(".resizable_handle")
             event.stopPropagation();
             const th = event.currentTarget.closest('th');
             th.style.width = th.style.minWidth;
-            throttledRecalculateTable(1000 / 30, table);
+            throttledRecalculateTable(table);
         });
     });
 
 // BENCHMARKS
-const th = table.querySelector('thead th');
-const sample = 100;
+const sample = 1000;
 
 setTimeout(() => {
-    const cachedTimeLabel = `${sample} iterations through ${noCells} cached table cells`;
+    const cachedTimeLabel = `${sample} iterations through ${noCells} table cells`;
+    let count = 0;
     console.time(cachedTimeLabel);
-    for (let i = 0; i < sample; i++) {
-        for (const j in ths) {
-            for (const td of tdsByColumnNo[j]) {
-                // td.offsetWidth;
-            }
+    for (const th of iterateCellsByRow(table.tHead, 0)) {
+        count++;
+        for (const cell of iterateCellsByColumn(table.tBodies.item(0), th.cellIndex)) {
+            count++;
         }
     }
     console.timeEnd(cachedTimeLabel);
-
-    const uncachedTimeLabel = `${sample} iterations through ${noCells} uncached table cells`;
-    console.time(uncachedTimeLabel);
-    for (let i = 0; i < sample; i++) {
-        const ths = Array.from(table.querySelectorAll("thead th"));
-        for (const j in ths) {
-            const tds = table.querySelectorAll("tbody td:nth-child(" + j + 1 + ")");
-            for (const td of tds) {
-                // td.offsetWidth;
-            }
-        }
-    }
-    console.timeEnd(uncachedTimeLabel);
 }, 1000)
-
